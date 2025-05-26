@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 
-def plotar_trelica(nos, barras, U, dof_map, tabela, escala=100):
+def plotar_trelica(nos, barras, U, dof_map, tabela, escala=0.1):
 
     def deslocado(n, coord):
         dx = U[dof_map[n][0]]

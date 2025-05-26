@@ -1,121 +1,123 @@
 import numpy as np
 import pandas as pd
-from scipy.linalg import solve
 
-
-def resolver_trelica(nos, barras, areas, forcas, apoios, forca_virtual=None, E=200e6):
-
+def resolver_trelica(nos, barras, restricoes, forcas, areas, E, forca_virtual=None):
     n_nos = len(nos)
-    n_barras = len(barras)
-    dof_total = 2 * n_nos
-
-    # Mapear graus de liberdade
-    node_index = {node: idx for idx, node in enumerate(nos.keys())}
-    dof_map = {}
-    for node, idx in node_index.items():
-        dof_map[node] = (2 * idx, 2 * idx + 1)
-
-    # Montar matriz de rigidez global
-    K = np.zeros((dof_total, dof_total))
+    dof = 2 * n_nos
+    K = np.zeros((dof, dof))
     L = []
-    T = []
 
-    for b, (ni, nj) in enumerate(barras):
-        xi, yi = nos[ni]
-        xj, yj = nos[nj]
+    # Mapeamento dos graus de liberdade (usado para plotagem)
+    dof_map = {}
+    for i in range(n_nos):
+        dof_map[i] = (2*i, 2*i+1)
+
+    for idx, (i, j) in enumerate(barras):
+        xi, yi = nos[i]
+        xj, yj = nos[j]
         dx = xj - xi
         dy = yj - yi
-        l = np.sqrt(dx ** 2 + dy ** 2)
+        l = np.sqrt(dx**2 + dy**2)
         c = dx / l
         s = dy / l
-
+        A = areas[idx]
         L.append(l)
-        T.append((c, s))
 
-        A = areas[b]
         k_local = (E * A / l) * np.array([
-            [c * c, c * s, -c * c, -c * s],
-            [c * s, s * s, -c * s, -s * s],
-            [-c * c, -c * s, c * c, c * s],
-            [-c * s, -s * s, c * s, s * s]
+            [ c*c,  c*s, -c*c, -c*s],
+            [ c*s,  s*s, -c*s, -s*s],
+            [-c*c, -c*s,  c*c,  c*s],
+            [-c*s, -s*s,  c*s,  s*s]
         ])
 
-        dof_i = dof_map[ni]
-        dof_j = dof_map[nj]
-        dof = [dof_i[0], dof_i[1], dof_j[0], dof_j[1]]
+        indices = [2*i, 2*i+1, 2*j, 2*j+1]
+        for m in range(4):
+            for n in range(4):
+                K[indices[m], indices[n]] += k_local[m, n]
 
-        for i in range(4):
-            for j in range(4):
-                K[dof[i], dof[j]] += k_local[i, j]
+    # Vetor de forças
+    F = np.zeros(dof)
+    for no, (fx, fy) in forcas.items():
+        F[2*no] = fx
+        F[2*no+1] = fy
 
-    # Vetor de forças externas
-    F = np.zeros(dof_total)
-    for node, (fx, fy) in forcas.items():
-        i, j = dof_map[node]
-        F[i] = fx
-        F[j] = fy
-
-    # Restrições (apoios)
+    # Restrições
     fixos = []
-    for node, (fx, fy) in apoios.items():
-        i, j = dof_map[node]
-        if fx: fixos.append(i)
-        if fy: fixos.append(j)
+    for no, (rx, ry) in restricoes.items():
+        if rx:
+            fixos.append(2*no)
+        if ry:
+            fixos.append(2*no+1)
 
-    livres = [i for i in range(dof_total) if i not in fixos]
-    K_ll = K[np.ix_(livres, livres)]
-    F_l = F[livres]
+    livres = list(set(range(dof)) - set(fixos))
+    K_reduzida = K[np.ix_(livres, livres)]
+    F_reduzido = F[livres]
 
-    # Resolver deslocamentos
-    U = np.zeros(dof_total)
-    U[livres] = solve(K_ll, F_l)
+    # Resolver sistema
+    U_reduzido = np.linalg.solve(K_reduzida, F_reduzido)
 
-    # Calcular forças internas N
+    U = np.zeros(dof)
+    for idx, i in enumerate(livres):
+        U[i] = U_reduzido[idx]
+
+    # Esforços internos (forças reais N)
     N = []
-    for b, (ni, nj) in enumerate(barras):
-        i, j = dof_map[ni], dof_map[nj]
-        u = np.array([U[i[0]], U[i[1]], U[j[0]], U[j[1]]])
-        c, s = T[b]
-        l = L[b]
-        A = areas[b]
+    for idx, (i, j) in enumerate(barras):
+        xi, yi = nos[i]
+        xj, yj = nos[j]
+        dx = xj - xi
+        dy = yj - yi
+        l = np.sqrt(dx**2 + dy**2)
+        c = dx / l
+        s = dy / l
+        A = areas[idx]
+        u = np.array([U[2*i], U[2*i+1], U[2*j], U[2*j+1]])
         n_local = (E * A / l) * np.array([-c, -s, c, s]) @ u
-        N.append(n_local / 1000)  # converter para kN
+        N.append(n_local)
 
-    # FORÇA VIRTUAL (n e Δ)
+    # Análise de força virtual, se fornecida
+    Δ = None
     if forca_virtual:
-        Fv = np.zeros(dof_total)
-        for node, (fx, fy) in forca_virtual.items():
-            i, j = dof_map[node]
-            Fv[i] = fx
-            Fv[j] = fy
+        Fv = np.zeros(dof)
+        for no, (fx, fy) in forca_virtual.items():
+            Fv[2*no] = fx
+            Fv[2*no+1] = fy
 
-        Fv_l = Fv[livres]
-        Uv = np.zeros(dof_total)
-        Uv[livres] = solve(K_ll, Fv_l)
+        Fv_reduzido = Fv[livres]
+        Uv_reduzido = np.linalg.solve(K_reduzida, Fv_reduzido)
+
+        Uv = np.zeros(dof)
+        for idx, i in enumerate(livres):
+            Uv[i] = Uv_reduzido[idx]
 
         n = []
-        for b, (ni, nj) in enumerate(barras):
-            i, j = dof_map[ni], dof_map[nj]
-            u = np.array([Uv[i[0]], Uv[i[1]], Uv[j[0]], Uv[j[1]]])
-            c, s = T[b]
-            l = L[b]
-            A = areas[b]
+        for idx, (i, j) in enumerate(barras):
+            xi, yi = nos[i]
+            xj, yj = nos[j]
+            dx = xj - xi
+            dy = yj - yi
+            l = np.sqrt(dx**2 + dy**2)
+            c = dx / l
+            s = dy / l
+            A = areas[idx]
+            u = np.array([Uv[2*i], Uv[2*i+1], Uv[2*j], Uv[2*j+1]])
             n_local = (E * A / l) * np.array([-c, -s, c, s]) @ u
-            n.append(n_local / 1000)
-    else:
-        n = [0] * n_barras
+            n.append(n_local)
 
-    #deslocamento via trabalho virtual
-    Δ = [N[i] * n[i] * L[i] / (E * areas[i]) * 1000 for i in range(n_barras)]
+        # Trabalho virtual: deslocamento Δ (em mm)
+        Δ = [N[i] * n[i] * L[i] / (E * areas[i]) * 1e3 for i in range(len(barras))]
 
-    # Resultado
-    tabela = pd.DataFrame({
-        "Barra": list(range(1, n_barras + 1)),
-        "Nó_i": [b[0] for b in barras],
-        "Nó_j": [b[1] for b in barras],
-        "N (kN)": np.round(N, 3),
-        "n (kN)": np.round(n, 3),
-        "Δ (mm)": np.round(Δ, 100),
+    # Construção do DataFrame
+    resultados = pd.DataFrame({
+        "Barra": list(range(len(barras))),
+        "Nós": barras,
+        "Comprimento (m)": np.round(L, 3),
+        "Área (cm²)": np.round(np.array(areas) * 1e4, 2),
+        "N (kN)": np.round(np.array(N) / 1e3, 3),
     })
 
-    return tabela, U, dof_map
+    if Δ:
+        resultados["n (kN)"] = np.round(np.array(n) / 1e3, 3)
+        resultados["Δ (mm)"] = np.round(Δ, 4)
+
+    return resultados, U, Δ, dof_map
